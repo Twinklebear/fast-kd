@@ -35,7 +35,7 @@ class TransferFunctionWidget {
     size_t selected_colormap = 0;
     std::vector<uint8_t> current_colormap;
 
-    std::vector<vec2f> alpha_control_pts = {vec2f(0.f), vec2f(1.f)};
+    std::vector<vec2f> alpha_control_pts = {vec2f(0.f, 1.f), vec2f(1.f)};
     size_t selected_point = -1;
 
     bool colormap_changed = true;

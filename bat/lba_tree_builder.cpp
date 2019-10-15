@@ -32,13 +32,23 @@ std::ostream &operator<<(std::ostream &os, const RadixTreeNode &n)
     return os;
 }
 
-LBATreelet::LBATreelet(LBuildPoint *points, uint32_t nprims, std::vector<Attribute> *attributes)
+LBATreelet::LBATreelet(LBuildPoint *points,
+                       uint32_t treelet_prim_offset,
+                       uint32_t treelet_prims,
+                       const std::vector<Attribute> *in_attributes)
     : points(points),
-      in_attribs(attributes),
-      n_prims(nprims),
-      max_depth(8 + 1.3 * std::log2(n_prims))
+      in_attribs(in_attributes),
+      treelet_prim_offset(treelet_prim_offset),
+      treelet_prims(treelet_prims),
+      max_depth(8 + 1.3 * std::log2(treelet_prims))
 {
-    build(0, n_prims, 0);
+    if (in_attribs) {
+        for (const auto &a : *in_attribs) {
+            auto arr = std::make_shared<OwnedArray<uint8_t>>(a.stride() * treelet_prims);
+            attributes.push_back(Attribute(a.name, arr, a.data_type));
+        }
+    }
+    build(treelet_prim_offset, treelet_prim_offset + treelet_prims, 0);
 }
 
 uint32_t LBATreelet::build(const size_t lo, const size_t hi, const uint32_t depth)
@@ -87,41 +97,88 @@ uint32_t LBATreelet::build(const size_t lo, const size_t hi, const uint32_t dept
     const size_t right_hi = hi;
 
     const uint32_t inner_idx = nodes.size();
-    nodes.push_back(KdNode(split_pos, split_axis));
+    nodes.push_back(KdNode::inner(split_pos, static_cast<AXIS>(split_axis)));
+
+    // Reserve the attribute range indices in the array for the inner node's ranges
+    if (in_attribs) {
+        for (size_t i = 0; i < in_attribs->size(); ++i) {
+            attribute_ranges.push_back(glm::vec2(std::numeric_limits<float>::infinity(),
+                                                 -std::numeric_limits<float>::infinity()));
+        }
+    }
 
     // Build the left child following the inner node, and the right node after the left subtree
     build(left_lo, left_hi, depth + 1);
     const uint32_t right_child = build(right_lo, right_hi, depth + 1);
     nodes[inner_idx].set_right_child(right_child);
 
+    // Merge the ranges of the child nodes to the parent
+    if (in_attribs) {
+        const size_t left_start = (inner_idx + 1) * in_attribs->size();
+        const size_t right_start = right_child * in_attribs->size();
+        for (size_t i = 0; i < in_attribs->size(); ++i) {
+            glm::vec2 &r = attribute_ranges[inner_idx * in_attribs->size() + i];
+            const glm::vec2 &left = attribute_ranges[left_start + i];
+            const glm::vec2 &right = attribute_ranges[right_start + i];
+
+            r.x = std::min(left.x, right.x);
+            r.y = std::max(left.y, right.y);
+        }
+    }
     return inner_idx;
 }
 
 uint32_t LBATreelet::build_leaf(const size_t lo, const size_t hi)
 {
-    const size_t num_prims = hi - lo;
+    const uint32_t num_prims = hi - lo;
     const uint32_t index = nodes.size();
-    nodes.push_back(KdNode(num_prims, lo));
-    // TODO: Here we can also re-order the attributes and compute our min/max range info
-    // Then the parent would compute its own min/max and update the child ranges to replace
-    // it with the attribute split position and direction.
+    nodes.push_back(KdNode::leaf(num_prims, lo));
+
+    // Now re-order the attributes and compute our min/max range info for the leaf, which
+    // will be propagated up the treelet to the parent.
+    if (in_attribs) {
+        const auto &inattr = *in_attribs;
+        for (size_t i = 0; i < inattr.size(); ++i) {
+            glm::vec2 range(std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity());
+            const size_t stride = inattr[i].stride();
+            for (uint32_t j = lo; j < hi; ++j) {
+                std::memcpy(
+                    attributes[i].at(j - treelet_prim_offset), inattr[i].at(points[j].id), stride);
+                update_range(attributes[i], j - treelet_prim_offset, range);
+            }
+            attribute_ranges.push_back(range);
+        }
+    }
     return index;
 }
 
 void LBATreelet::compact(std::shared_ptr<OwnedArray<KdNode>> &out_nodes,
-                         std::shared_ptr<OwnedArray<glm::vec3>> &out_points) const
+                         std::shared_ptr<OwnedArray<glm::vec3>> &out_points,
+                         std::shared_ptr<OwnedArray<glm::vec2>> &out_ranges,
+                         std::vector<Attribute> &compact_attribs) const
 {
     // We already have the tree in the correct flattened layout, we just need to apply a global
     // offset to the indices used by the nodes to put them into the global array.
     const uint32_t index_offset = out_nodes->size();
     const uint32_t prims_offset = out_points->size();
     std::copy(nodes.begin(), nodes.end(), std::back_inserter(out_nodes->array));
-    // Now that all treelets share the build points view, we could just copy it once and then track
-    // the primitive offsets instead of having each treelet copy its points independently
-    std::transform(
-        points, points + n_prims, std::back_inserter(out_points->array), [](const LBuildPoint &p) {
-            return p.pos;
-        });
+    std::copy(
+        attribute_ranges.begin(), attribute_ranges.end(), std::back_inserter(out_ranges->array));
+
+    // Copy our points into the compacted points list
+    std::transform(points + treelet_prim_offset,
+                   points + treelet_prim_offset + treelet_prims,
+                   std::back_inserter(out_points->array),
+                   [](const LBuildPoint &p) { return p.pos; });
+
+    // Copy the attributes into the corresponding compacted buffers, each child keeps its
+    // own copy of the re-ordered attributes so we can just directly overwrite the original input
+    for (size_t i = 0; i < attributes.size(); ++i) {
+        std::memcpy(compact_attribs[i].at(prims_offset),
+                    attributes[i].at(0),
+                    attributes[i].data->size_bytes());
+    }
 
     for (size_t i = 0; i < nodes.size(); ++i) {
         KdNode &n = out_nodes->at(i + index_offset);
@@ -129,7 +186,7 @@ void LBATreelet::compact(std::shared_ptr<OwnedArray<KdNode>> &out_nodes,
             const uint32_t right_child_offset = n.right_child_offset();
             n.set_right_child(right_child_offset + index_offset);
         } else {
-            n.prim_indices_offset += prims_offset;
+            n.prim_indices_offset = n.prim_indices_offset - treelet_prim_offset + prims_offset;
         }
     }
 }
@@ -197,6 +254,7 @@ LBATreeBuilder::LBATreeBuilder(std::vector<glm::vec3> points, std::vector<Attrib
     std::vector<uint32_t> parent_pointers(num_inner_nodes, std::numeric_limits<uint32_t>::max());
     std::vector<uint32_t> leaf_parent_pointers(num_unique_keys,
                                                std::numeric_limits<uint32_t>::max());
+
     // Build the inner nodes of our coarse k-d tree
     tbb::parallel_for(size_t(0), num_inner_nodes, [&](const size_t i) {
         const int dir = (delta(i, i + 1) - delta(i, i - 1)) >= 0 ? 1 : -1;
@@ -232,6 +290,8 @@ LBATreeBuilder::LBATreeBuilder(std::vector<glm::vec3> points, std::vector<Attrib
         const size_t gamma = i + s * dir + std::min(dir, 0);
 
         // Write the child pointers for this inner node
+        // TODO: seems like sometimes we get the child info wrong here? or is that b/c the attrib
+        // out of bounds mem write bug?
         inner_nodes[i].left_child = gamma;
         inner_nodes[i].right_child = gamma + 1;
         if (std::min(i, j) == gamma) {
@@ -280,56 +340,53 @@ LBATreeBuilder::LBATreeBuilder(std::vector<glm::vec3> points, std::vector<Attrib
     // Sync for the treelets to finish
     treelets_task.wait();
 
-    // TODO: do the bottom-up coarse tree traversal in parallel to propagate
-    // the min/max ranges up the tree.
-
-#if 0
+    // Now propagate the attribute min/max values up the tree to the root
     std::vector<std::atomic<uint32_t>> node_touched(num_inner_nodes);
     // Can't do a copy ctor for the atomics, we've got to go init them all
     for (auto &v : node_touched) {
         v = 0;
     }
 
-    std::vector<Box> inner_node_bounds(num_inner_nodes, Box{});
-
-    // Future thing to do: once the treelets are built and have all their info we can traverse
-    // up from the coarse leaves and propage the treelet min/max info etc. up to the root
-    for (size_t i = 0; i < leaf_parent_pointers.size(); ++i) {
+    const uint32_t num_attribs = attribs.size();
+    attribute_ranges.resize(num_attribs * inner_nodes.size());
+    tbb::parallel_for(size_t(0), leaf_parent_pointers.size(), [&](const size_t i) {
         uint32_t cur_node = i;
         uint32_t parent = leaf_parent_pointers[cur_node];
-        // std::cout << "leaf " << cur_node << " parent is: " << parent
-        //          << ", particle: " << glm::to_string(build_points[cur_node].pos) << "\n";
         do {
-            // std::cout << "node " << cur_node << " parent is: " << parent << "\n";
             uint32_t count = node_touched[parent].fetch_add(1);
-            // If we're the second to reach this node, compute its bounds from the children
+            // If we're the second to reach this node, compute its attribute ranges by
+            // combining the children
             if (count == 1) {
                 const RadixTreeNode &node = inner_nodes[parent];
-                Box left_bounds, right_bounds;
-                if (node.left_leaf) {
-                    left_bounds.extend(build_points[node.left_child].pos);
-                } else {
-                    left_bounds.box_union(inner_node_bounds[node.left_child]);
-                }
-                if (node.right_leaf) {
-                    right_bounds.extend(build_points[node.right_child].pos);
-                } else {
-                    right_bounds.box_union(inner_node_bounds[node.right_child]);
-                }
+                for (uint32_t j = 0; j < num_attribs; ++j) {
+                    glm::vec2 left_range, right_range;
+                    if (node.left_leaf) {
+                        // Range of the root node of the treelet
+                        left_range = treelets[node.left_child].attribute_ranges[j];
+                    } else {
+                        left_range = attribute_ranges[node.left_child * num_attribs + j];
+                    }
+                    if (node.right_leaf) {
+                        right_range = treelets[node.right_child].attribute_ranges[j];
+                    } else {
+                        right_range = attribute_ranges[node.right_child * num_attribs + j];
+                    }
 
-                inner_node_bounds[parent] = box_union(left_bounds, right_bounds);
+                    attribute_ranges[parent * num_attribs + j].x =
+                        std::min(left_range.x, right_range.x);
+                    attribute_ranges[parent * num_attribs + j].y =
+                        std::max(left_range.y, right_range.y);
+                }
+                cur_node = parent;
+                parent = parent_pointers[cur_node];
             } else {
                 // If we're the first to reach the node the work below this one is incomplete
                 // and we terminate
                 break;
             }
-            cur_node = parent;
-            parent = parent_pointers[cur_node];
             // The root will have no parent, so terminate once we've processed it
         } while (parent != std::numeric_limits<uint32_t>::max());
-        // std::cout << "=======\n";
-    }
-#endif
+    });
 
     std::cout << "Avg. # prims/treelet: "
               << static_cast<float>(build_points.size()) / num_unique_keys << "\n";
@@ -353,12 +410,12 @@ BATree LBATreeBuilder::compact()
     auto points = std::make_shared<OwnedArray<glm::vec3>>();
     points->reserve(build_points.size());
 
-    compact_tree(0, nodes, points);
-
-    // TODO: dumping for now for testing
-    attribs.clear();
-    // TODO: This would no longer be computed just during compaction
     auto attrib_ranges = std::make_shared<OwnedArray<glm::vec2>>();
+    compact_tree(0, nodes, points, attrib_ranges, 0);
+
+    for (size_t i = 0; i < attribs.size(); ++i) {
+        attribs[i].range = attrib_ranges->at(i);
+    }
 
     auto end = high_resolution_clock::now();
     auto dur = duration_cast<milliseconds>(end - start);
@@ -373,34 +430,40 @@ BATree LBATreeBuilder::compact()
 
 uint32_t LBATreeBuilder::compact_tree(uint32_t n,
                                       std::shared_ptr<OwnedArray<KdNode>> &nodes,
-                                      std::shared_ptr<OwnedArray<glm::vec3>> &points)
+                                      std::shared_ptr<OwnedArray<glm::vec3>> &points,
+                                      std::shared_ptr<OwnedArray<glm::vec2>> &ranges,
+                                      uint32_t depth)
 {
     const RadixTreeNode &rnode = inner_nodes[n];
     const uint32_t index = nodes->size();
-    nodes->push_back(KdNode(rnode.split_pos, rnode.split_axis));
+    nodes->push_back(KdNode::inner(rnode.split_pos, rnode.split_axis));
+    for (uint32_t i = 0; i < attribs.size(); ++i) {
+        ranges->push_back(attribute_ranges[n * attribs.size() + i]);
+    }
     if (!rnode.left_leaf) {
-        compact_tree(rnode.left_child, nodes, points);
+        compact_tree(rnode.left_child, nodes, points, ranges, depth + 1);
     } else {
-        compact_leaf(rnode.left_child, nodes, points);
+        compact_leaf(rnode.left_child, nodes, points, ranges);
     }
 
     uint32_t right_child = 0;
     if (!rnode.right_leaf) {
-        right_child = compact_tree(rnode.right_child, nodes, points);
+        right_child = compact_tree(rnode.right_child, nodes, points, ranges, depth + 1);
     } else {
-        right_child = compact_leaf(rnode.right_child, nodes, points);
+        right_child = compact_leaf(rnode.right_child, nodes, points, ranges);
     }
     nodes->at(index).set_right_child(right_child);
-
     return index;
 }
 
 uint32_t LBATreeBuilder::compact_leaf(uint32_t n,
                                       std::shared_ptr<OwnedArray<KdNode>> &nodes,
-                                      std::shared_ptr<OwnedArray<glm::vec3>> &points)
+                                      std::shared_ptr<OwnedArray<glm::vec3>> &points,
+                                      std::shared_ptr<OwnedArray<glm::vec2>> &ranges)
 {
+    // TODO: We also need the attributes and ranges here to compact the treelet's info in
     const uint32_t index = nodes->size();
-    treelets[n].compact(nodes, points);
+    treelets[n].compact(nodes, points, ranges, attribs);
     return index;
 }
 
@@ -417,8 +480,10 @@ void LBATreeBuilder::build_treelets()
                                           return (a & kd_morton_mask) < (b & kd_morton_mask);
                                       });
 
-        treelets[i] =
-            LBATreelet(&(*prims.first), std::distance(prims.first, prims.second), &attribs);
+        const size_t treelet_prims = std::distance(prims.first, prims.second);
+        const size_t lo = std::distance(build_points.begin(), prims.first);
+
+        treelets[i] = LBATreelet(build_points.data(), lo, treelet_prims, &attribs);
     });
 }
 

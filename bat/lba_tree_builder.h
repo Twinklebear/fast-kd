@@ -55,16 +55,23 @@ struct LBATreelet {
     const std::vector<Attribute> *in_attribs = nullptr;
     std::vector<Attribute> attributes;
     std::vector<KdNode> nodes;
+    std::vector<glm::vec2> attribute_ranges;
 
-    uint32_t n_prims = 0;
+    uint32_t treelet_prim_offset = 0;
+    uint32_t treelet_prims = 0;
     uint32_t min_prims = 64;
     uint32_t max_depth;
 
-    LBATreelet(LBuildPoint *points, uint32_t n_prims, std::vector<Attribute> *attributes = nullptr);
+    LBATreelet(LBuildPoint *points,
+               uint32_t treelet_prim_offset,
+               uint32_t treelet_prims,
+               const std::vector<Attribute> *attributes = nullptr);
     LBATreelet() = default;
 
     void compact(std::shared_ptr<OwnedArray<KdNode>> &nodes,
-                 std::shared_ptr<OwnedArray<glm::vec3>> &points) const;
+                 std::shared_ptr<OwnedArray<glm::vec3>> &points,
+                 std::shared_ptr<OwnedArray<glm::vec2>> &ranges,
+                 std::vector<Attribute> &compact_attribs) const;
 
 private:
     uint32_t build(const size_t lo, const size_t hi, const uint32_t depth);
@@ -86,6 +93,8 @@ struct LBATreeBuilder {
     std::vector<uint32_t> morton_codes;
     // The treelets built within each leaf of the coarse k-d tree
     std::vector<LBATreelet> treelets;
+    // Attribute ranges of the coarse k-d tree nodes
+    std::vector<glm::vec2> attribute_ranges;
 
     uint32_t kd_morton_bits = 4;
     uint32_t kd_morton_mask = 0;
@@ -99,11 +108,14 @@ struct LBATreeBuilder {
 private:
     uint32_t compact_tree(uint32_t n,
                           std::shared_ptr<OwnedArray<KdNode>> &nodes,
-                          std::shared_ptr<OwnedArray<glm::vec3>> &points);
+                          std::shared_ptr<OwnedArray<glm::vec3>> &points,
+                          std::shared_ptr<OwnedArray<glm::vec2>> &ranges,
+                          uint32_t depth);
 
     uint32_t compact_leaf(uint32_t n,
                           std::shared_ptr<OwnedArray<KdNode>> &nodes,
-                          std::shared_ptr<OwnedArray<glm::vec3>> &points);
+                          std::shared_ptr<OwnedArray<glm::vec3>> &points,
+                          std::shared_ptr<OwnedArray<glm::vec2>> &ranges);
 
     void build_treelets();
 };

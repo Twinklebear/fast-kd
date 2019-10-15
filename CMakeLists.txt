@@ -17,7 +17,3 @@ add_subdirectory(util)
 add_subdirectory(bat)
 add_subdirectory(viewer)
 
-if (NOT WIN32)
-    add_subdirectory(adaptive_io_test)
-endif()
-

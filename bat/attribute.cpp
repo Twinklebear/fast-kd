@@ -24,6 +24,11 @@ size_t Attribute::size() const
     return data->size() / stride();
 }
 
+uint8_t *Attribute::at(size_t i)
+{
+    return data->data() + i * stride();
+}
+
 const uint8_t *Attribute::at(size_t i) const
 {
     return data->data() + i * stride();

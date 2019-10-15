@@ -15,6 +15,8 @@ public:
 
     OwnedArray(std::vector<T> &&array) : array(array) {}
 
+    OwnedArray(const T *arr, size_t sz) : array(arr, arr + sz) {}
+
     explicit OwnedArray(size_t size)
     {
         resize(size);

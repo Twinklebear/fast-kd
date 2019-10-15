@@ -627,12 +627,11 @@ BATree load_xyz(const std::string &fname)
         }
     }
 
-    auto atom_arr = std::make_shared<BorrowedArray<uint8_t>>(
+    auto atom_arr = std::make_shared<OwnedArray<uint8_t>>(
         reinterpret_cast<uint8_t *>(atom_ids.data()), sizeof(int) * atom_ids.size());
 
     std::vector<Attribute> attributes = {Attribute("atom_id", atom_arr, DTYPE::INT_32)};
 
-    // Note: attribs aren't currently supported or used
     return LBATreeBuilder(std::move(points), std::move(attributes)).compact();
 }
 

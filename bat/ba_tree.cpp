@@ -10,14 +10,20 @@
 #include <glm/glm.hpp>
 #include <glm/gtx/string_cast.hpp>
 
-KdNode::KdNode(float split_pos, AXIS split_axis)
-    : split_pos(split_pos), right_child(static_cast<uint32_t>(split_axis))
+KdNode KdNode::inner(float split_pos, AXIS split_axis)
 {
+    KdNode n;
+    n.split_pos = split_pos;
+    n.right_child = split_axis;
+    return n;
 }
 
-KdNode::KdNode(uint32_t nprims, uint32_t prim_offset)
-    : prim_indices_offset(prim_offset), num_prims(3 | (nprims << 2))
+KdNode KdNode::leaf(uint32_t nprims, uint32_t prim_offset)
 {
+    KdNode n;
+    n.prim_indices_offset = prim_offset;
+    n.num_prims = 3 | (nprims << 2);
+    return n;
 }
 
 KdNode::KdNode(const KdNode &n)

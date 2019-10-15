@@ -30,10 +30,8 @@ struct KdNode {
         uint32_t num_prims;
     };
 
-    // Interior node
-    KdNode(float split_pos, AXIS split_axis);
-    // Leaf node
-    KdNode(uint32_t nprims, uint32_t prim_offset);
+    static KdNode inner(float split_pos, AXIS split_axis);
+    static KdNode leaf(uint32_t nprims, uint32_t prim_offset);
 
     KdNode(const KdNode &n);
 
